@@ -1,0 +1,77 @@
+name: AAPS Training - isolated build (experimental)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Restrict source to virtual pump and disable communications
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          gradle = Path('app/build.gradle.kts')
+          s = gradle.read_text()
+          # Fail closed if upstream wiring changes.
+          start = s.index('    val pumpExclusions = setOf(":pump:virtual")')
+          end = s.index('\n    implementation(libs.androidx.core)', start)
+          original = s[start:end]
+          assert '"fullImplementation"(project(it.path))' in original
+          assert '"pumpcontrolImplementation"(project(it.path))' in original
+          s = s[:start] + '    // TRAINING BUILD: real pump drivers deliberately not linked.\n' + s[end:]
+          assert 'implementation(project(":pump:virtual"))' in s
+          assert 'applicationId = "info.nightscout.androidaps.training"' in s
+          gradle.write_text(s)
+
+          manifest = Path('app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          # Block permissions in merged manifest, including permissions from libraries.
+          insertion = '''
+              <!-- TRAINING: explicitly reject radio/network permissions from every manifest. -->
+              <uses-permission android:name="android.permission.BLUETOOTH" tools:node="remove" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" tools:node="remove" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:node="remove" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" tools:node="remove" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" tools:node="remove" />
+              <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" tools:node="remove" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove" />
+          '''
+          xml = re.sub(r'<uses-permission\s+android:name="android.permission.(?:BLUETOOTH(?:_ADMIN|_CONNECT|_SCAN|_ADVERTISE)?|INTERNET|NEARBY_WIFI_DEVICES|ACCESS_WIFI_STATE)"[^>]*/>', '', xml, flags=re.S)
+          xml = xml.replace('    <application', insertion + '\n    <application', 1)
+          manifest.write_text(xml)
+          PY
+      - name: Build debug APK (not for use with a real pump)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleFullDebug --no-daemon --stacktrace
+      - name: Verify APK identity and forbidden permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/full/debug -name '*.apk' -print -quit)
+          test -n "$APK"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -1)
+          BAD=$($AAPT dump permissions "$APK" | grep -E 'android.permission.(BLUETOOTH|INTERNET|NEARBY_WIFI_DEVICES|ACCESS_WIFI_STATE)' || true)
+          if [[ -n "$BAD" ]]; then echo "Forbidden permission(s): $BAD"; exit 1; fi
+          PKG=$($AAPT dump badging "$APK" | grep '^package:')
+          echo "$PKG"
+          echo "$PKG" | grep -q "name='info.nightscout.androidaps.training'" || exit 1
+          mkdir -p dist
+          cp "$APK" dist/AAPS-Training-EXPERIMENTAL.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AAPS-Training-EXPERIMENTAL
+          path: dist/AAPS-Training-EXPERIMENTAL.apk
+          if-no-files-found: error
