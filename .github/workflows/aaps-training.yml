@@ -14,7 +14,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Restrict source to virtual pump and disable communications
         shell: bash
         run: |
